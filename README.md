@@ -1,6 +1,8 @@
 # Mini Solar System
 一个简单的迷你太阳系 3D 网页模型。
 
+[点击预览](https://yibi2333.github.io/Mini-Solar-System/)
+
 ## 运行
 
 用浏览器运行打开 `Mini Solar System.html` 
