@@ -7,7 +7,8 @@
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { overflow: hidden; background: #000; font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; }
-        canvas#gameCanvas { display: block; width: 100vw; height: 100vh; cursor: grab; }
+        /* touch-action: none 让画布自己处理触摸手势，否则会被浏览器的滚动/缩放抢走 */
+        canvas#gameCanvas { display: block; width: 100vw; height: 100vh; cursor: grab; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
         canvas#gameCanvas:active { cursor: grabbing; }
         #infoPanel {
             position: fixed;
@@ -51,6 +52,14 @@
         #speedControl input[type="range"] { width: 200px; accent-color: #ffcc00; }
         #speedValue { min-width: 40px; text-align: center; font-weight: bold; }
         #loadingScreen { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: #000; color: #fff; font-size: 20px; z-index: 100; }
+        /* 小屏适配：面板改为整宽，速度条收窄，避免超出屏幕 */
+        @media (max-width: 480px) {
+            #infoPanel { top: 10px; left: 10px; right: 10px; max-width: none; padding: 16px 18px; }
+            #infoPanel h2 { font-size: 18px; }
+            #infoPanel .info-row { font-size: 13px; }
+            #speedControl { bottom: 16px; padding: 8px 14px; gap: 10px; font-size: 12px; }
+            #speedControl input[type="range"] { width: 140px; }
+        }
     </style>
 </head>
 <body>
@@ -587,34 +596,74 @@
             // ==================== 相机交互与点击检测 ====================
             const raycaster = new THREE.Raycaster();
             const mouse = new THREE.Vector2();
-            let isMouseDown = false;
-            let mouseDownPos = { x: 0, y: 0 };
-            let lastMouseX = 0, lastMouseY = 0;
+            // 用指针事件统一鼠标与触摸：单指/左键拖拽旋转，双指捏合或滚轮缩放
+            const pointers = new Map();
+            let lastX = 0, lastY = 0;
+            let downPos = { x: 0, y: 0 };
+            let pinchStart = 0;
+            let isMultiTouch = false;
             let targetRotationY = 0, targetRotationX = 0.2, currentRotationY = 0, currentRotationX = 0.2;
             let targetZoom = 80, currentZoom = 80;
 
-            canvas.addEventListener('mousedown', (e) => { isMouseDown = true; mouseDownPos.x = e.clientX; mouseDownPos.y = e.clientY; lastMouseX = e.clientX; lastMouseY = e.clientY; });
-            window.addEventListener('mouseup', (e) => {
-                if (!isMouseDown) return;
-                isMouseDown = false;
-                // 在画布外松手视为取消，避免操作 UI 时误触发点击
-                if (e.target !== canvas) return;
-                const dx = e.clientX - mouseDownPos.x;
-                const dy = e.clientY - mouseDownPos.y;
-                if (Math.abs(dx) < 5 && Math.abs(dy) < 5) handleClick(e);
+            function clampZoom(value) { return Math.max(15, Math.min(200, value)); }
+
+            function pinchDistance() {
+                const [a, b] = Array.from(pointers.values());
+                return Math.hypot(a.x - b.x, a.y - b.y);
+            }
+
+            canvas.addEventListener('pointerdown', (e) => {
+                canvas.setPointerCapture(e.pointerId);
+                pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+                if (pointers.size === 1) {
+                    downPos = { x: e.clientX, y: e.clientY };
+                    lastX = e.clientX;
+                    lastY = e.clientY;
+                    isMultiTouch = false;
+                } else if (pointers.size === 2) {
+                    isMultiTouch = true;
+                    pinchStart = pinchDistance();
+                }
             });
-            window.addEventListener('blur', () => { isMouseDown = false; });
-            window.addEventListener('mousemove', (e) => {
-                if (!isMouseDown) return;
-                const deltaX = e.clientX - lastMouseX;
-                const deltaY = e.clientY - lastMouseY;
-                targetRotationY -= deltaX * 0.005;
-                targetRotationX += deltaY * 0.003;
-                targetRotationX = Math.max(-1.2, Math.min(1.2, targetRotationX));
-                lastMouseX = e.clientX;
-                lastMouseY = e.clientY;
+
+            canvas.addEventListener('pointermove', (e) => {
+                if (!pointers.has(e.pointerId)) return;
+                pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+                if (pointers.size >= 2) {
+                    // 双指拉开则视距变小（放大），收拢则拉远
+                    const distance = pinchDistance();
+                    if (pinchStart > 0 && distance > 0) targetZoom = clampZoom(targetZoom * (pinchStart / distance));
+                    pinchStart = distance;
+                    return;
+                }
+
+                targetRotationY -= (e.clientX - lastX) * 0.005;
+                targetRotationX = Math.max(-1.2, Math.min(1.2, targetRotationX + (e.clientY - lastY) * 0.003));
+                lastX = e.clientX;
+                lastY = e.clientY;
             });
-            canvas.addEventListener('wheel', (e) => { e.preventDefault(); targetZoom = Math.max(15, Math.min(200, targetZoom + e.deltaY * 0.1)); }, { passive: false });
+
+            function endPointer(e) {
+                if (!pointers.has(e.pointerId)) return;
+                const dx = e.clientX - downPos.x;
+                const dy = e.clientY - downPos.y;
+                pointers.delete(e.pointerId);
+                if (pointers.size < 2) pinchStart = 0;
+                // 只有单指轻点才算选中，捏合与拖拽不触发
+                if (!isMultiTouch && Math.abs(dx) < 5 && Math.abs(dy) < 5) handleClick(e);
+                if (pointers.size === 0) isMultiTouch = false;
+            }
+            canvas.addEventListener('pointerup', endPointer);
+            canvas.addEventListener('pointercancel', (e) => {
+                pointers.delete(e.pointerId);
+                pinchStart = 0;
+                if (pointers.size === 0) isMultiTouch = false;
+            });
+            window.addEventListener('blur', () => { pointers.clear(); pinchStart = 0; isMultiTouch = false; });
+
+            canvas.addEventListener('wheel', (e) => { e.preventDefault(); targetZoom = clampZoom(targetZoom + e.deltaY * 0.1); }, { passive: false });
+            canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
             const infoPanel = document.getElementById('infoPanel');
             const panelTitle = document.getElementById('panelTitle');
